@@ -160,20 +160,20 @@ def main(url, pattern, filename):
         # Parse the central directory entries
         entries = parser.parse_central_directory(central_directory_data)
 
-        image_zip = None
+        inner_zip = None
         for entry in entries:
             if pattern.match(entry.file_name):
-                image_zip = entry
-                print(f"Image ZIP found: {image_zip.file_name} at offset {image_zip.offset}")
+                inner_zip = entry
+                print(f"Inner ZIP found: {inner_zip.file_name} at offset {inner_zip.offset}")
                 break
         else:
             raise FileNotFoundError(
-                f"No image zip found matching {str(pattern)}"
+                f"No inner zip found matching {str(pattern)}"
             )
 
         # Fetch the local file header (typically the first 30 bytes)
         local_file_header_data = fetcher.fetch_range(
-            url, image_zip.offset, image_zip.offset + LocalFileHeader.FIXED_SIZE - 1
+            url, inner_zip.offset, inner_zip.offset + LocalFileHeader.FIXED_SIZE - 1
         )
 
         image_file_header = LocalFileHeader.unpack(local_file_header_data, "", b"")
@@ -185,18 +185,18 @@ def main(url, pattern, filename):
             + image_file_header.file_name_length
         )
 
-        if not (image_zip.compressed_size == image_file_header.compressed_size):
+        if not (inner_zip.compressed_size == image_file_header.compressed_size):
             raise Exception("Size of the zip in central directory doesn't match the one in local file header")
 
         end_of_image_zip = (
-            image_zip.offset + local_file_header_size + image_zip.compressed_size
+            inner_zip.offset + local_file_header_size + inner_zip.compressed_size
         )
 
         image_zip_last_bytes = fetcher.fetch_range(
             url, end_of_image_zip - 65536, end_of_image_zip - 1
         )
         
-        # Find EOCD in the image zip
+        # Find EOCD in the inner zip
         image_zip_eocd_offset = parser.find_eocd(image_zip_last_bytes)
 
         # Parse the EOCD to get the central directory's offset and size
@@ -207,11 +207,11 @@ def main(url, pattern, filename):
         central_directory_offset = eocd_info["central_directory_offset"]
         central_directory_size = eocd_info["central_directory_size"]
 
-        print(f"Central Directory found in image zip\n{eocd_info}")
+        print(f"Central Directory found in inner zip\n{eocd_info}")
         
-        # The central directory offset is relative to the beginning of the image ZIP, so adjust by adding image_zip.offset
+        # The central directory offset is relative to the beginning of the inner ZIP, so adjust by adding inner_zip.offset
         absolute_central_directory_offset = (
-            image_zip.offset + central_directory_offset + local_file_header_size
+            inner_zip.offset + central_directory_offset + local_file_header_size
         )
 
         # Fetch the central directory data
@@ -221,7 +221,7 @@ def main(url, pattern, filename):
             absolute_central_directory_offset + central_directory_size - 1,
         )
 
-        # Parse the central directory of the image zip
+        # Parse the central directory of the inner zip
         nested_entries = parser.parse_central_directory(central_directory_data)
 
         # List all files in the nested zip central directory
@@ -232,14 +232,14 @@ def main(url, pattern, filename):
                 print(f"{file.file_name} found {file.crc32=:x}, {file.compressed_size=}, {file.uncompressed_size=}")
                 break
         else:
-            raise FileNotFoundError("Boot image not found in nested zip")
+            raise FileNotFoundError("{file.file_name} not found in inner zip")
         
         # Offset in the outer zip =
         boot_data_start = (
-            image_zip.offset # Postion of the Image zip
-            + local_file_header_size # localfile header size of the image zip
-            + file.offset # offset of the file from the image zip
-            + LocalFileHeader.FIXED_SIZE # local file header of the boot_image
+            inner_zip.offset # Postion of the inner zip
+            + local_file_header_size # localfile header size of the inner zip
+            + file.offset # offset of the file from the inner zip
+            + LocalFileHeader.FIXED_SIZE # local file header of the file
             + file.file_name_length
             + file.extra_field_length
         )
@@ -258,7 +258,7 @@ def main(url, pattern, filename):
             raise ValueError(f"Computed CRC32 ({computed_crc32}) doesn't match retrieved one {file.crc32}")
         
 
-        path = Path(image_zip.file_name).parent / file.file_name
+        path = Path(inner_zip.file_name).parent / file.file_name
         path.parent.mkdir(exist_ok=True)
         path.write_bytes(decompressed_data)
 
@@ -270,8 +270,8 @@ if __name__ == "__main__":
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="Download and process ZIP files from a given URL.")
     parser.add_argument("url", type=str, help="The URL of the ZIP file to process.")
-    parser.add_argument("re", type=str, nargs='?', help="re pattern to find the inner (image) zip.", default=r".*image.*\.zip")
-    parser.add_argument("filename", type=str, nargs='?', help="filename to retrieve in the inner zip", default="boot.img")
+    parser.add_argument("-r", "--re", type=str, nargs='?', help="re pattern to find the inner (image) zip.", default=r".*image.*\.zip")
+    parser.add_argument("-f", "--filename", type=str, nargs='?', help="filename to retrieve in the inner zip", default="boot.img")
     args = parser.parse_args()
 
     url = args.url  # Get the URL from the command-line argument
