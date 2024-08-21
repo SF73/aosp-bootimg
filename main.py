@@ -8,8 +8,6 @@ import re
 
 from zipHeaders import LocalFileHeader, CentralDirectoryFileHeader
 
-INNER_ZIP_PATTERN = re.compile(r".*image.*\.zip", re.IGNORECASE)
-
 
 class RemoteFileFetcher:
     def __init__(self):
@@ -134,7 +132,7 @@ class ZipCentralDirectoryParser:
         return entries
 
 
-def main(url):
+def main(url, pattern, filename):
 
     fetcher = RemoteFileFetcher()
     parser = ZipCentralDirectoryParser()
@@ -164,18 +162,18 @@ def main(url):
 
         image_zip = None
         for entry in entries:
-            if INNER_ZIP_PATTERN.match(entry.file_name):
+            if pattern.match(entry.file_name):
                 image_zip = entry
                 print(f"Image ZIP found: {image_zip.file_name} at offset {image_zip.offset}")
                 break
         else:
             raise FileNotFoundError(
-                f"No image zip found matching {str(INNER_ZIP_PATTERN)}"
+                f"No image zip found matching {str(pattern)}"
             )
 
         # Fetch the local file header (typically the first 30 bytes)
         local_file_header_data = fetcher.fetch_range(
-            url, image_zip.offset, image_zip.offset + 30 - 1
+            url, image_zip.offset, image_zip.offset + LocalFileHeader.FIXED_SIZE - 1
         )
 
         image_file_header = LocalFileHeader.unpack(local_file_header_data, "", b"")
@@ -187,14 +185,15 @@ def main(url):
             + image_file_header.file_name_length
         )
 
-        assert image_zip.compressed_size == image_file_header.compressed_size
+        if not (image_zip.compressed_size == image_file_header.compressed_size):
+            raise Exception("Size of the zip in central directory doesn't match the one in local file header")
 
         end_of_image_zip = (
             image_zip.offset + local_file_header_size + image_zip.compressed_size
         )
 
         image_zip_last_bytes = fetcher.fetch_range(
-            url, end_of_image_zip - 4096, end_of_image_zip - 1
+            url, end_of_image_zip - 65536, end_of_image_zip - 1
         )
         
         # Find EOCD in the image zip
@@ -226,11 +225,11 @@ def main(url):
         nested_entries = parser.parse_central_directory(central_directory_data)
 
         # List all files in the nested zip central directory
-        boot_img = None
+        file = None
         for nested_entry in nested_entries:
-            if nested_entry.file_name == "boot.img":
-                boot_img = nested_entry
-                print(f"{boot_img.file_name} found {boot_img.crc32=:x}, {boot_img.compressed_size=}, {boot_img.uncompressed_size=}")
+            if nested_entry.file_name == filename:
+                file = nested_entry
+                print(f"{file.file_name} found {file.crc32=:x}, {file.compressed_size=}, {file.uncompressed_size=}")
                 break
         else:
             raise FileNotFoundError("Boot image not found in nested zip")
@@ -239,36 +238,29 @@ def main(url):
         boot_data_start = (
             image_zip.offset # Postion of the Image zip
             + local_file_header_size # localfile header size of the image zip
-            + boot_img.offset # offset of the boot.img from the image zip
+            + file.offset # offset of the file from the image zip
             + LocalFileHeader.FIXED_SIZE # local file header of the boot_image
-            + boot_img.file_name_length
-            + boot_img.extra_field_length
+            + file.file_name_length
+            + file.extra_field_length
         )
-        boot_data_stop = boot_data_start + boot_img.compressed_size
+        boot_data_stop = boot_data_start + file.compressed_size
         compressed_data = fetcher.fetch_range(url, boot_data_start, boot_data_stop)
-        if boot_img.compression_method == 0:  # No compression
-            assert(boot_img.compressed_size == boot_img.uncompressed_size)
+        if file.compression_method == 0:  # No compression
+            assert(file.compressed_size == file.uncompressed_size)
             decompressed_data = compressed_data
-        elif boot_img.compression_method == 8:  # Deflate compression
+        elif file.compression_method == 8:  # Deflate compression
             decompressed_data = zlib.decompress(compressed_data, wbits=-zlib.MAX_WBITS)
         else:
-            raise NotImplementedError(f"Unsupported compression method: {boot_img.compression_method}")
+            raise NotImplementedError(f"Unsupported compression method: {file.compression_method}")
             
         computed_crc32 = binascii.crc32(decompressed_data) & 0xFFFFFFFF
-        if computed_crc32 != boot_img.crc32:
-            raise ValueError(f"Computed CRC32 ({computed_crc32}) doesn't match retrieved one {boot_img.crc32}")
+        if computed_crc32 != file.crc32:
+            raise ValueError(f"Computed CRC32 ({computed_crc32}) doesn't match retrieved one {file.crc32}")
         
 
-        path = Path(image_zip.file_name).parent / boot_img.file_name
+        path = Path(image_zip.file_name).parent / file.file_name
         path.parent.mkdir(exist_ok=True)
         path.write_bytes(decompressed_data)
-
-        # # Apply file permissions
-        # apply_file_permissions(entry.file_name, entry.external_file_attributes)
-
-        # # Apply modification time from the ZIP file's MS-DOS date and time fields
-        # apply_modification_time(entry.file_name, entry.last_mod_date, entry.last_mod_time)
-        # print(f"{boot_img.file_name} saved !")
 
     except Exception as e:
         print(f"Error: {e}")
@@ -278,7 +270,11 @@ if __name__ == "__main__":
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="Download and process ZIP files from a given URL.")
     parser.add_argument("url", type=str, help="The URL of the ZIP file to process.")
+    parser.add_argument("re", type=str, nargs='?', help="re pattern to find the inner (image) zip.", default=r".*image.*\.zip")
+    parser.add_argument("filename", type=str, nargs='?', help="filename to retrieve in the inner zip", default="boot.img")
     args = parser.parse_args()
 
     url = args.url  # Get the URL from the command-line argument
-    main(url)
+    pattern = re.compile(args.re, re.IGNORECASE)
+    filename = args.filename
+    main(url, pattern, filename)
