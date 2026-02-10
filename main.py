@@ -12,34 +12,46 @@ from zipHeaders import LocalFileHeader, CentralDirectoryFileHeader
 class RemoteFileFetcher:
     def __init__(self):
         self.session = requests.Session()
+        # Make identity the default for *all* requests in this session
+        self.session.headers.update({"Accept-Encoding": "identity"})
+
+    def _get_raw_bytes(self, url, headers):
+        # stream=True lets us control decoding; decode_content=False prevents gzip decoding
+        resp = self.session.get(url, headers=headers, stream=True)
+        resp.raise_for_status()
+
+        # If a server ignores identity and still claims gzip, do NOT let requests decode it
+        raw = resp.raw.read(decode_content=False)
+        return resp, raw
 
     def fetch_last_n_bytes(self, url, n_bytes):
-        response = self.session.head(url)
-        if response.status_code == 200 and "Content-Length" in response.headers:
-            content_length = int(response.headers["Content-Length"])
-            start_byte = max(0, content_length - n_bytes)
-            headers = {"Range": f"bytes={start_byte}-{content_length - 1}"}
-            response = self.session.get(url, headers=headers)
-            if response.status_code == 206:  # Partial content
-                return response.content, content_length
-            else:
-                raise Exception(
-                    f"Failed to fetch the last {n_bytes} bytes. Status code: {response.status_code}"
-                )
-        else:
-            raise Exception(
-                f"Failed to retrieve content length. Status code: {response.status_code}"
-            )
+        head = self.session.head(url)
+        head.raise_for_status()
+
+        if "Content-Length" not in head.headers:
+            raise Exception("Failed to retrieve content length (no Content-Length header).")
+
+        content_length = int(head.headers["Content-Length"])
+        start_byte = max(0, content_length - n_bytes)
+
+        headers = {"Range": f"bytes={start_byte}-{content_length - 1}"}
+
+        resp, raw = self._get_raw_bytes(url, headers)
+
+        if resp.status_code == 206:  # Partial Content
+            return raw, content_length
+
+        raise Exception(f"Failed to fetch the last {n_bytes} bytes. Status code: {resp.status_code}")
 
     def fetch_range(self, url, start_byte, end_byte):
         headers = {"Range": f"bytes={start_byte}-{end_byte}"}
-        response = self.session.get(url, headers=headers)
-        if response.status_code == 206:  # Partial content
-            return response.content
-        else:
-            raise Exception(
-                f"Failed to fetch byte range. Status code: {response.status_code}"
-            )
+
+        resp, raw = self._get_raw_bytes(url, headers)
+
+        if resp.status_code == 206:
+            return raw
+
+        raise Exception(f"Failed to fetch byte range. Status code: {resp.status_code}")
 
 
 class ZipCentralDirectoryParser:
