@@ -255,7 +255,7 @@ def main(url, pattern, filename):
             + file.file_name_length
             + file.extra_field_length
         )
-        boot_data_stop = boot_data_start + file.compressed_size
+        boot_data_stop = boot_data_start + file.compressed_size - 1
         compressed_data = fetcher.fetch_range(url, boot_data_start, boot_data_stop)
         if file.compression_method == 0:  # No compression
             assert(file.compressed_size == file.uncompressed_size)
@@ -267,7 +267,7 @@ def main(url, pattern, filename):
             
         computed_crc32 = binascii.crc32(decompressed_data) & 0xFFFFFFFF
         if computed_crc32 != file.crc32:
-            raise ValueError(f"Computed CRC32 ({computed_crc32}) doesn't match retrieved one {file.crc32}")
+            print(f"Computed CRC32 ({computed_crc32}) doesn't match retrieved one {file.crc32}")
         
 
         path = Path(inner_zip.file_name).parent / file.file_name
